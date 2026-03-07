@@ -27,7 +27,7 @@ func main() {
 
 	app := &Application{
 		config: &config,
-		store: storage,
+		store:  storage,
 	}
 	app.run()
 }
