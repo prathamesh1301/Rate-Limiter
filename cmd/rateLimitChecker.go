@@ -26,69 +26,83 @@ type ResultDetail struct {
 
 func (app *Application) rateLimitChecker(w http.ResponseWriter, r *http.Request) {
 	userId := r.URL.Query().Get("user_id")
-
-	details, err := app.store.RateLimiter.GetUserLimitDetails(userId)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			// User has no record yet — create one with full tokens
-			now := time.Now().UTC()
-			err = app.store.RateLimiter.CreateUserLimitDetails(userId, maxTokens, now)
-			if err != nil {
-				http.Error(w, "Failed to create rate limit details", http.StatusInternalServerError)
-				return
-			}
-			details.Tokens = maxTokens
-			details.LastRefillTime = now
-		} else {
-			http.Error(w, "Failed to get rate limit details", http.StatusInternalServerError)
-			return
-		}
-	}
-
-	rateLimitCkDetail := RateLimitCKDetail{
-		Tokens:         details.Tokens,
-		LastRefillTime: details.LastRefillTime,
-	}
-
-	now := time.Now().UTC()
-	elapsedTime := now.Sub(rateLimitCkDetail.LastRefillTime.UTC()).Seconds()
-
-	// Step 1: Refill tokens based on elapsed time
-	newTokens := rateLimitCkDetail.Tokens + int(elapsedTime)*refillRate
-	if newTokens > maxTokens {
-		newTokens = maxTokens
-	}
-
-	// Step 2: Check if a token is available and consume it
-	var result ResultDetail
-
-	if newTokens > 0 {
-		// Allow the request, consume one token
-		newTokens--
-		result = ResultDetail{
-			Allowed:      true,
-			RefreshAfter: 0,
-		}
-	} else {
-		// Deny the request, tell them when the next token arrives
-		refreshAfter := int(math.Ceil(1.0 / float64(refillRate)))
-		result = ResultDetail{
-			Allowed:      false,
-			RefreshAfter: refreshAfter,
-		}
-	}
-
-	// Step 3: Update the DB with the new token count and refill time
-	err = app.store.RateLimiter.UpdateUserLimitDetails(userId, newTokens, now.UTC())
-	if err != nil {
-		http.Error(w, "Failed to update rate limit details", http.StatusInternalServerError)
+	if userId == "" {
+		http.Error(w, "user_id is required", http.StatusBadRequest)
 		return
 	}
 
-	// Step 4: Return JSON response
+	var rateLimitDetail RateLimitCKDetail
+	isNewUser := false 
+
+	// ---- GET: Redis first, fallback to Postgres ----
+	cacheDetail, err := app.store.RateLimiter.GetUserLimitDetailsFromCache(userId)
+	if err != nil {
+		details, err := app.store.RateLimiter.GetUserLimitDetails(userId)
+		if err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				http.Error(w, "Failed to get rate limit details", http.StatusInternalServerError)
+				return
+			}
+			// New user — create in Postgres + cache, skip the update at the end
+			now := time.Now().UTC()
+			if err = app.store.RateLimiter.CreateUserLimitDetails(userId, maxTokens, now); err != nil {
+				http.Error(w, "Failed to create rate limit details", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("X-Data-Source", "new-user -> postgres")
+			app.store.RateLimiter.SetUserLimitDetailsInCache(userId, maxTokens, now)
+			rateLimitDetail = RateLimitCKDetail{Tokens: maxTokens, LastRefillTime: now}
+			isNewUser = true 
+		} else {
+			w.Header().Set("X-Data-Source", "postgres")
+			rateLimitDetail = RateLimitCKDetail{Tokens: details.Tokens, LastRefillTime: details.LastRefillTime}
+		}
+	} else {
+		w.Header().Set("X-Data-Source", "redis")
+		rateLimitDetail = RateLimitCKDetail{Tokens: cacheDetail.Tokens, LastRefillTime: cacheDetail.LastRefillTime}
+	}
+
+	// ---- CALCULATE: refill + consume ----
+	now := time.Now().UTC()
+
+	elapsedTime := now.Sub(rateLimitDetail.LastRefillTime.UTC()).Seconds()
+	if elapsedTime < 0 {
+		elapsedTime = 0
+	}
+
+	newTokens := min(rateLimitDetail.Tokens+int(elapsedTime)*refillRate, maxTokens)
+
+	var result ResultDetail
+	if newTokens > 0 {
+		newTokens--
+		result = ResultDetail{Allowed: true}
+	} else {
+		result = ResultDetail{
+			Allowed:      false,
+			RefreshAfter: int(math.Ceil(1.0 / float64(refillRate))),
+		}
+	}
+
+	// ---- WRITE: skip if new user, already written above ----
+	if !isNewUser {
+		if err = app.store.RateLimiter.UpdateUserLimitDetails(userId, newTokens, now); err != nil {
+			http.Error(w, "Failed to update rate limit details", http.StatusInternalServerError)
+			return
+		}
+		app.store.RateLimiter.SetUserLimitDetailsInCache(userId, newTokens, now)
+	}
+
+	// ---- RESPOND ----
 	w.Header().Set("Content-Type", "application/json")
 	if !result.Allowed {
 		w.WriteHeader(http.StatusTooManyRequests)
 	}
 	json.NewEncoder(w).Encode(result)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

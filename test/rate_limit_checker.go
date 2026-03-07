@@ -18,6 +18,11 @@ type ResultDetailNew struct {
 	RefreshAfter int  `json:"refresh_after"`
 }
 
+type Response struct {
+	Result ResultDetailNew
+	Source string // "redis", "postgres", "new-user"
+}
+
 // ---- Test 1: Burst — fire 15 requests instantly, expect first 10 to pass ----
 func testBurst() {
 	fmt.Println("\n========== TEST 1: BURST (15 requests instantly) ==========")
@@ -26,18 +31,20 @@ func testBurst() {
 	denied := 0
 
 	for i := 1; i <= 15; i++ {
-		result, err := sendRequest(userID)
+		resp, err := sendRequest(userID)
 		if err != nil {
 			fmt.Printf("  Request %2d → ERROR: %v\n", i, err)
 			continue
 		}
 
-		if result.Allowed {
+		source := formatSource(resp.Source)
+
+		if resp.Result.Allowed {
 			allowed++
-			fmt.Printf("  Request %2d → ✅ ALLOWED\n", i)
+			fmt.Printf("  Request %2d → ✅ ALLOWED   [source: %s]\n", i, source)
 		} else {
 			denied++
-			fmt.Printf("  Request %2d → ❌ BLOCKED  (retry after %ds)\n", i, result.RefreshAfter)
+			fmt.Printf("  Request %2d → ❌ BLOCKED   [source: %s] (retry after %ds)\n", i, source, resp.Result.RefreshAfter)
 		}
 	}
 
@@ -49,36 +56,33 @@ func testBurst() {
 func testRefill() {
 	fmt.Println("\n========== TEST 2: REFILL (exhaust → wait 3s → retry) ==========")
 
-	// Exhaust all tokens
 	fmt.Println("  Exhausting tokens...")
 	for i := 1; i <= 10; i++ {
 		sendRequest(userID)
 	}
 
-	// Confirm exhausted
 	result, _ := sendRequest(userID)
-	if !result.Allowed {
+	if !result.Result.Allowed {
 		fmt.Println("  ✅ Confirmed exhausted")
 	}
 
-	// Wait for refill
 	waitSecs := 3
 	fmt.Printf("  Waiting %d seconds for refill...\n", waitSecs)
 	time.Sleep(time.Duration(waitSecs) * time.Second)
 
-	// Try again — should get waitSecs * refillRate tokens back
 	allowed := 0
 	for i := 1; i <= 5; i++ {
-		result, err := sendRequest(userID)
+		resp, err := sendRequest(userID)
 		if err != nil {
 			fmt.Printf("  Request %d → ERROR: %v\n", i, err)
 			continue
 		}
-		if result.Allowed {
+		source := formatSource(resp.Source)
+		if resp.Result.Allowed {
 			allowed++
-			fmt.Printf("  Request %d → ✅ ALLOWED\n", i)
+			fmt.Printf("  Request %d → ✅ ALLOWED   [source: %s]\n", i, source)
 		} else {
-			fmt.Printf("  Request %d → ❌ BLOCKED\n", i)
+			fmt.Printf("  Request %d → ❌ BLOCKED   [source: %s]\n", i, source)
 		}
 	}
 
@@ -94,6 +98,8 @@ func testConcurrent() {
 
 	allowed := 0
 	denied := 0
+	redisHits := 0
+	postgresHits := 0
 	goroutines := 10
 
 	for i := 1; i <= goroutines; i++ {
@@ -101,7 +107,7 @@ func testConcurrent() {
 		go func(id int) {
 			defer wg.Done()
 
-			result, err := sendRequest(userID)
+			resp, err := sendRequest(userID)
 			if err != nil {
 				fmt.Printf("  Goroutine %2d → ERROR: %v\n", id, err)
 				return
@@ -110,18 +116,27 @@ func testConcurrent() {
 			mu.Lock()
 			defer mu.Unlock()
 
-			if result.Allowed {
+			source := formatSource(resp.Source)
+
+			if resp.Source == "redis" {
+				redisHits++
+			} else {
+				postgresHits++
+			}
+
+			if resp.Result.Allowed {
 				allowed++
-				fmt.Printf("  Goroutine %2d → ✅ ALLOWED\n", id)
+				fmt.Printf("  Goroutine %2d → ✅ ALLOWED   [source: %s]\n", id, source)
 			} else {
 				denied++
-				fmt.Printf("  Goroutine %2d → ❌ BLOCKED\n", id)
+				fmt.Printf("  Goroutine %2d → ❌ BLOCKED   [source: %s]\n", id, source)
 			}
 		}(i)
 	}
 
 	wg.Wait()
 	fmt.Printf("\n  Summary: %d allowed, %d blocked\n", allowed, denied)
+	fmt.Printf("  Cache hits: %d redis, %d postgres\n", redisHits, postgresHits)
 }
 
 // ---- Test 4: Different users — each user should have independent buckets ----
@@ -131,15 +146,16 @@ func testMultipleUsers() {
 	users := []string{"alice", "bob", "charlie"}
 
 	for _, user := range users {
-		result, err := sendRequest(user)
+		resp, err := sendRequest(user)
 		if err != nil {
 			fmt.Printf("  %-10s → ERROR: %v\n", user, err)
 			continue
 		}
-		if result.Allowed {
-			fmt.Printf("  %-10s → ✅ ALLOWED\n", user)
+		source := formatSource(resp.Source)
+		if resp.Result.Allowed {
+			fmt.Printf("  %-10s → ✅ ALLOWED   [source: %s]\n", user, source)
 		} else {
-			fmt.Printf("  %-10s → ❌ BLOCKED\n", user)
+			fmt.Printf("  %-10s → ❌ BLOCKED   [source: %s]\n", user, source)
 		}
 	}
 }
@@ -149,34 +165,83 @@ func testSlowDrip() {
 	fmt.Println("\n========== TEST 5: SLOW DRIP (1 req/sec for 5 secs) ==========")
 
 	for i := 1; i <= 5; i++ {
-		result, err := sendRequest(userID)
+		resp, err := sendRequest(userID)
 		if err != nil {
 			fmt.Printf("  Request %d → ERROR: %v\n", i, err)
-		} else if result.Allowed {
-			fmt.Printf("  Request %d → ✅ ALLOWED\n", i)
+		} else if resp.Result.Allowed {
+			fmt.Printf("  Request %d → ✅ ALLOWED   [source: %s]\n", i, formatSource(resp.Source))
 		} else {
-			fmt.Printf("  Request %d → ❌ BLOCKED (unexpected!)\n", i)
+			fmt.Printf("  Request %d → ❌ BLOCKED   [source: %s] (unexpected!)\n", i, formatSource(resp.Source))
 		}
 		time.Sleep(1 * time.Second)
 	}
 }
 
+// ---- Test 6: Cache vs DB — first request hits DB, second hits cache ----
+func testCacheVsDB() {
+	fmt.Println("\n========== TEST 6: CACHE VS DB (new user flow) ==========")
+
+	// Use a fresh user so we can observe new-user → redis flow
+	freshUser := fmt.Sprintf("fresh_user_%d", time.Now().Unix())
+
+	resp1, err := sendRequest(freshUser)
+	if err != nil {
+		fmt.Printf("  Request 1 → ERROR: %v\n", err)
+		return
+	}
+	fmt.Printf("  Request 1 → [source: %s] (expected: new-user)\n", formatSource(resp1.Source))
+
+	resp2, err := sendRequest(freshUser)
+	if err != nil {
+		fmt.Printf("  Request 2 → ERROR: %v\n", err)
+		return
+	}
+	fmt.Printf("  Request 2 → [source: %s] (expected: redis)\n", formatSource(resp2.Source))
+
+	resp3, err := sendRequest(freshUser)
+	if err != nil {
+		fmt.Printf("  Request 3 → ERROR: %v\n", err)
+		return
+	}
+	fmt.Printf("  Request 3 → [source: %s] (expected: redis)\n", formatSource(resp3.Source))
+}
+
 // ---- Helper ----
-func sendRequest(userID string) (ResultDetailNew, error) {
+func sendRequest(userID string) (Response, error) {
 	url := fmt.Sprintf("%s?user_id=%s", baseURL, userID)
 
 	resp, err := http.Get(url)
 	if err != nil {
-		return ResultDetailNew{}, err
+		return Response{}, err
 	}
 	defer resp.Body.Close()
 
 	var result ResultDetailNew
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return ResultDetailNew{}, err
+		return Response{}, err
 	}
 
-	return result, nil
+	// Read source header set by the server
+	source := resp.Header.Get("X-Data-Source")
+	if source == "" {
+		source = "unknown"
+	}
+
+	return Response{Result: result, Source: source}, nil
+}
+
+// formatSource makes the source label colourful and consistent width
+func formatSource(source string) string {
+	switch source {
+	case "redis":
+		return "🔴 redis   "
+	case "postgres":
+		return "🐘 postgres"
+	case "new-user":
+		return "🆕 new-user"
+	default:
+		return "❓ unknown "
+	}
 }
 
 func main() {
@@ -184,9 +249,11 @@ func main() {
 	fmt.Println("   Target:", baseURL)
 	fmt.Println("   User:  ", userID)
 
+	// Test 6 first — uses a fresh user so source tracking is clean
+	testCacheVsDB()
+
 	testBurst()
-	
-	// Reset between tests by waiting a bit
+
 	fmt.Println("\n  Waiting 15s to refill bucket before next test...")
 	time.Sleep(15 * time.Second)
 

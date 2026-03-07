@@ -12,15 +12,22 @@ type Application struct {
 }
 
 type config struct {
-	addr     string
-	dbConfig *dbConfig
-}
+	addr        string
+	dbConfig    *dbConfig
+	redisConfig *redisConfig
+}	
 
 type dbConfig struct {
 	addr         string
 	maxOpenConns int
 	maxIdleConns int
 	maxIdleTime  string
+}
+
+type redisConfig struct {
+	addr string
+	password string
+	db   int
 }
 
 func (app *Application) getMuxHandler() http.Handler {
