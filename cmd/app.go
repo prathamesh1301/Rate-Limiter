@@ -2,8 +2,8 @@ package main
 
 import (
 	"net/http"
-
 	"github.com/prathamesh/rate-limiter/internals/store"
+	 httpSwagger "github.com/swaggo/http-swagger"
 )
 
 type Application struct {
@@ -35,6 +35,9 @@ func (app *Application) getMuxHandler() http.Handler {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		app.rateLimitChecker(w, r)
 	})
+	mux.Handle("/swagger/", httpSwagger.Handler(
+		httpSwagger.URL("/swagger/doc.json"),
+	))	
 	return mux
 }
 

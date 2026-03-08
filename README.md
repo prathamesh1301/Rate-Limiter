@@ -73,6 +73,10 @@ Each response includes an `X-Data-Source` header indicating where the data was s
 - `postgres` — cache miss, served from database
 - `new-user` — first time seeing this user
 
+## API Documentation
+
+This project uses **Swagger** for API documentation. The OpenAPI/Swagger specification can be found in the `docs/` directory.
+
 ## Testing
 
 Run the test suite with the server already running:

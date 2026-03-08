@@ -24,6 +24,20 @@ type ResultDetail struct {
 	RefreshAfter int  `json:"refresh_after"` // seconds until next token
 }
 
+// rateLimitChecker godoc
+// @Summary      Check rate limit for a user
+// @Description  Checks if a user has exceeded their rate limit using the token bucket algorithm.
+// @Description  Reads from Redis first, falls back to PostgreSQL on cache miss.
+// @Description  New users are automatically created with full tokens.
+// @Tags         rate-limiter
+// @Produce      json
+// @Param        user_id  query     string        true  "User ID to rate limit"
+// @Success      200      {object}  ResultDetail  "Request allowed"
+// @Failure      400      {object}  string        "user_id is required"
+// @Failure      429      {object}  ResultDetail  "Rate limit exceeded"
+// @Failure      500      {object}  string        "Internal server error"
+// @Header       200      {string}  X-Data-Source  "Data source: redis | postgres | new-user -> postgres"
+// @Router       /rate-limit [get]
 func (app *Application) rateLimitChecker(w http.ResponseWriter, r *http.Request) {
 	userId := r.URL.Query().Get("user_id")
 	if userId == "" {

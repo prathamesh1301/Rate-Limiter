@@ -1,0 +1,51 @@
+definitions:
+  main.ResultDetail:
+    properties:
+      allowed:
+        type: boolean
+      refresh_after:
+        description: seconds until next token
+        type: integer
+    type: object
+info:
+  contact: {}
+paths:
+  /rate-limit:
+    get:
+      description: |-
+        Checks if a user has exceeded their rate limit using the token bucket algorithm.
+        Reads from Redis first, falls back to PostgreSQL on cache miss.
+        New users are automatically created with full tokens.
+      parameters:
+      - description: User ID to rate limit
+        in: query
+        name: user_id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Request allowed
+          headers:
+            X-Data-Source:
+              description: 'Data source: redis | postgres | new-user -> postgres'
+              type: string
+          schema:
+            $ref: '#/definitions/main.ResultDetail'
+        "400":
+          description: user_id is required
+          schema:
+            type: string
+        "429":
+          description: Rate limit exceeded
+          schema:
+            $ref: '#/definitions/main.ResultDetail'
+        "500":
+          description: Internal server error
+          schema:
+            type: string
+      summary: Check rate limit for a user
+      tags:
+      - rate-limiter
+swagger: "2.0"
