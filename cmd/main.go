@@ -3,7 +3,10 @@ package main
 import (
 	"context"
 	"log"
+	"os"
+	"strconv"
 
+	"github.com/joho/godotenv"
 	"github.com/prathamesh/rate-limiter/internals/cache"
 	"github.com/prathamesh/rate-limiter/internals/db"
 	"github.com/prathamesh/rate-limiter/internals/logger"
@@ -11,6 +14,17 @@ import (
 )
 
 func main() {
+	// Load environment variables from .env file
+	// Try current directory, then try parent directory (for cmd/ structure)
+	err := godotenv.Load()
+	if err != nil {
+		err = godotenv.Load("../.env")
+	}
+
+	if err != nil {
+		log.Println("No .env file found, using system environment variables")
+	}
+
 	logger, err := logger.NewLogger()
 	if err != nil {
 		log.Fatal("failed to create logger: ", err)
@@ -20,16 +34,16 @@ func main() {
 	logger.Info("Logger initialized successfully")
 
 	dbConfig := &dbConfig{
-		addr:         "postgres://admin:adminPassword@localhost:5432/postgres?sslmode=disable",
-		maxOpenConns: 10,
-		maxIdleConns: 5,
-		maxIdleTime:  "5m",
+		addr:         getEnv("DB_ADDR", "postgres://user:pwd@localhost:5432/postgres?sslmode=disable"),
+		maxOpenConns: getEnvInt("DB_MAX_OPEN_CONNS", 10),
+		maxIdleConns: getEnvInt("DB_MAX_IDLE_CONNS", 5),
+		maxIdleTime:  getEnv("DB_MAX_IDLE_TIME", "5m"),
 	}
 
 	redisConfig := &redisConfig{
-		addr:     "localhost:6379",
-		password: "",
-		db:       0,
+		addr:     getEnv("REDIS_ADDR", "localhost:6379"),
+		password: getEnv("REDIS_PASSWORD", ""),
+		db:       getEnvInt("REDIS_DB", 0),
 	}
 
 	db, err := db.New(dbConfig.addr, dbConfig.maxOpenConns, dbConfig.maxIdleConns, dbConfig.maxIdleTime)
@@ -39,15 +53,16 @@ func main() {
 	defer db.Close()
 	logger.Info("Connected to PostgreSQL successfully")
 
-	rdb, err := cache.NewRedisClient(context.Background(), redisConfig.addr, "", 0)
+	rdb, err := cache.NewRedisClient(context.Background(), redisConfig.addr, redisConfig.password, redisConfig.db)
 	if err != nil {
 		logger.Fatal("failed to connect to redis: ", err)
 	}
 	defer rdb.Close()
 	logger.Info("Connected to Redis successfully")
+
 	storage := store.NewStorage(db, rdb)
 	config := config{
-		addr:        ":8080",
+		addr:        getEnv("SERVER_ADDR", ":8080"),
 		dbConfig:    dbConfig,
 		redisConfig: redisConfig,
 	}
@@ -58,4 +73,22 @@ func main() {
 		logger: logger,
 	}
 	app.run()
+}
+
+func getEnv(key, fallback string) string {
+	if value, ok := os.LookupEnv(key); ok {
+		return value
+	}
+	return fallback
+}
+
+func getEnvInt(key string, fallback int) int {
+	if value, ok := os.LookupEnv(key); ok {
+		i, err := strconv.Atoi(value)
+		if err != nil {
+			return fallback
+		}
+		return i
+	}
+	return fallback
 }
