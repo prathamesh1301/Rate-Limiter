@@ -180,3 +180,31 @@ go run ratelimit_runner.go
 | **Concurrent** | 10 simultaneous goroutines — no race conditions |
 | **Multiple users** | Each user has an independent bucket |
 | **Slow drip** | 1 req/sec never gets blocked |
+
+## Logging
+
+This project uses **Uber Zap** for high-performance, structured logging. Logs are output in JSON format (production mode), making them easy to parse with log aggregators (like ELK, Datadog, or Grafana Loki).
+
+The logs capture critical application events, including database/cache connectivity and real-time rate-limiting decisions.
+
+### Example Logs
+
+**Startup & Initialization:**
+```json
+{"level":"info","ts":1709905200.123,"msg":"Logger initialized successfully"}
+{"level":"info","ts":1709905200.456,"msg":"Connected to PostgreSQL successfully"}
+{"level":"info","ts":1709905200.789,"msg":"Connected to Redis successfully"}
+{"level":"info","ts":1709905201.012,"msg":"Starting server on :8080"}
+```
+
+**Rate Limiting Events:**
+```json
+{"level":"info","ts":1709905205.123,"msg":"processing rate limit check","user_id":"user_123"}
+{"level":"info","ts":1709905205.456,"msg":"rate limit allowed","user_id":"user_123","remaining_tokens":9,"source":"new-user -> postgres"}
+{"level":"info","ts":1709905210.789,"msg":"rate limit exceeded","user_id":"user_123","source":"redis"}
+```
+
+**Error Handling:**
+```json
+{"level":"error","ts":1709905215.123,"msg":"failed to update rate limit in DB","user_id":"user_123","error":"connection pool exhausted"}
+```

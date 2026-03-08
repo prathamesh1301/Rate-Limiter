@@ -41,12 +41,15 @@ type ResultDetail struct {
 func (app *Application) rateLimitChecker(w http.ResponseWriter, r *http.Request) {
 	userId := r.URL.Query().Get("user_id")
 	if userId == "" {
+		app.logger.Warn("request rejected: user_id is missing")
 		http.Error(w, "user_id is required", http.StatusBadRequest)
 		return
 	}
 
+	app.logger.Infow("processing rate limit check", "user_id", userId)
+
 	var rateLimitDetail RateLimitCKDetail
-	isNewUser := false 
+	isNewUser := false
 
 	// ---- GET: Redis first, fallback to Postgres ----
 	cacheDetail, err := app.store.RateLimiter.GetUserLimitDetailsFromCache(userId)
@@ -54,26 +57,31 @@ func (app *Application) rateLimitChecker(w http.ResponseWriter, r *http.Request)
 		details, err := app.store.RateLimiter.GetUserLimitDetails(userId)
 		if err != nil {
 			if !errors.Is(err, sql.ErrNoRows) {
+				app.logger.Errorw("failed to fetch rate limit details from DB", "user_id", userId, "error", err)
 				http.Error(w, "Failed to get rate limit details", http.StatusInternalServerError)
 				return
 			}
 			// New user — create in Postgres + cache, skip the update at the end
 			now := time.Now().UTC()
 			if err = app.store.RateLimiter.CreateUserLimitDetails(userId, maxTokens, now); err != nil {
+				app.logger.Errorw("failed to create new user record", "user_id", userId, "error", err)
 				http.Error(w, "Failed to create rate limit details", http.StatusInternalServerError)
 				return
 			}
 			w.Header().Set("X-Data-Source", "new-user -> postgres")
 			app.store.RateLimiter.SetUserLimitDetailsInCache(userId, maxTokens, now)
 			rateLimitDetail = RateLimitCKDetail{Tokens: maxTokens, LastRefillTime: now}
-			isNewUser = true 
+			isNewUser = true
+			app.logger.Infow("new user created", "user_id", userId)
 		} else {
 			w.Header().Set("X-Data-Source", "postgres")
 			rateLimitDetail = RateLimitCKDetail{Tokens: details.Tokens, LastRefillTime: details.LastRefillTime}
+			app.logger.Debugw("cache miss: fetched from postgres", "user_id", userId)
 		}
 	} else {
 		w.Header().Set("X-Data-Source", "redis")
 		rateLimitDetail = RateLimitCKDetail{Tokens: cacheDetail.Tokens, LastRefillTime: cacheDetail.LastRefillTime}
+		app.logger.Debugw("cache hit: fetched from redis", "user_id", userId)
 	}
 
 	// ---- CALCULATE: refill + consume ----
@@ -100,6 +108,7 @@ func (app *Application) rateLimitChecker(w http.ResponseWriter, r *http.Request)
 	// ---- WRITE: skip if new user, already written above ----
 	if !isNewUser {
 		if err = app.store.RateLimiter.UpdateUserLimitDetails(userId, newTokens, now); err != nil {
+			app.logger.Errorw("failed to update rate limit in DB", "user_id", userId, "error", err)
 			http.Error(w, "Failed to update rate limit details", http.StatusInternalServerError)
 			return
 		}
@@ -110,6 +119,9 @@ func (app *Application) rateLimitChecker(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Content-Type", "application/json")
 	if !result.Allowed {
 		w.WriteHeader(http.StatusTooManyRequests)
+		app.logger.Infow("rate limit exceeded", "user_id", userId, "source", w.Header().Get("X-Data-Source"))
+	} else {
+		app.logger.Infow("rate limit allowed", "user_id", userId, "remaining_tokens", newTokens, "source", w.Header().Get("X-Data-Source"))
 	}
 	json.NewEncoder(w).Encode(result)
 }
